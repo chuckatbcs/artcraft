@@ -21,6 +21,15 @@ from engine_generators import (
     generate_3d_mesh_locally,
     generate_gaussian_splat_locally,
 )
+from provider_router import (
+    get_providers_config,
+    save_providers_config,
+    get_active_provider_info,
+    set_active_provider,
+    update_provider_details,
+    query_remote_models,
+    generate_remote_image,
+)
 
 app = FastAPI(title="ArtCraft Local Engine", version="1.0.0")
 
@@ -179,7 +188,16 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
             model_name = params.get("model")
             ref_path = media_registry.get(ref_token) if ref_token else None
             out_file = MEDIA_DIR / f"{media_token}.png"
-            generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
+            
+            active_prov = get_active_provider_info()
+            if active_prov.get("key") != "local_comfyui":
+                print(f"[Engine] Routing image generation to active provider: {active_prov.get('name')}")
+                remote_out = generate_remote_image(prompt, model=model_name, output_path=out_file)
+                if not remote_out or not remote_out.exists():
+                    print("[Engine] Remote provider call failed/empty; falling back to local SDXL GPU.")
+                    generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
+            else:
+                generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
             
         elif task_type == "video":
             prompt = params.get("prompt", "Local video generation")
@@ -507,6 +525,47 @@ def cost_estimate():
     }
 
 # -------------------------------------------------------------
+# Dynamic AI Provider Management (OmniRoute / OpenRouter / Local ComfyUI)
+# -------------------------------------------------------------
+@app.get("/v1/ai/providers")
+def get_ai_providers():
+    cfg = get_providers_config()
+    safe_providers = {}
+    for k, v in cfg.get("providers", {}).items():
+        v_copy = dict(v)
+        key = v_copy.get("api_key", "")
+        if key and len(key) > 8:
+            v_copy["api_key"] = key[:4] + "..." + key[-4:]
+        elif key:
+            v_copy["api_key"] = "****"
+        safe_providers[k] = v_copy
+    return {
+        "success": True,
+        "active_provider": cfg.get("active_provider", "local_comfyui"),
+        "providers": safe_providers
+    }
+
+@app.post("/v1/ai/providers")
+async def update_ai_providers(request: Request):
+    data = await request.json()
+    active = data.get("active_provider")
+    if active:
+        set_active_provider(active)
+    updates = data.get("provider_details")
+    target = data.get("target_provider") or active
+    if target and updates:
+        update_provider_details(target, updates)
+    return {"success": True, "active_provider": get_active_provider_info()}
+
+@app.get("/v1/ai/models")
+def get_ai_models(provider: Optional[str] = None):
+    prov = provider or get_active_provider_info().get("key", "local_comfyui")
+    if prov == "local_comfyui":
+        return list_image_models()
+    models = query_remote_models(prov)
+    return {"success": True, "provider": prov, "models": models}
+
+# -------------------------------------------------------------
 # Model Catalog
 # -------------------------------------------------------------
 @app.get("/v1/omni_gen/models/image")
@@ -516,6 +575,24 @@ def list_image_models():
         "wide_sixteen_by_nine", "tall_three_by_four", "wide_four_by_three"
     ]
     
+    # 0. Check active provider from provider_router
+    active_prov = get_active_provider_info()
+    remote_models = []
+    if active_prov.get("key") != "local_comfyui":
+        remote_models = query_remote_models(active_prov.get("key"))
+        for rm in remote_models:
+            rm["aspect_ratio_options"] = aspect_ratios
+            rm["aspect_ratio_default"] = "square"
+            rm["aspect_ratio_default_when_editing"] = "square"
+            rm["resolution_options"] = ["auto_1K", "auto_2K"]
+            rm["resolution_default"] = "auto_1K"
+            rm["quality_options"] = ["standard", "high"]
+            rm["default_quality"] = "standard"
+            rm["batch_size_min"] = 1
+            rm["batch_size_max"] = 4
+            rm["batch_size_options"] = [1, 2, 4]
+            rm["batch_size_default"] = 1
+
     # 1. Dynamically scan checkpoints folder for any local safetensors
     discovered_models = []
     ckpt_dir = CHECKPOINTS_DIR
@@ -839,10 +916,10 @@ def list_image_models():
         }
     ]
     
-    # Merge discovered and standard models without duplicates
+    # Merge remote, discovered, and standard models without duplicates
     seen = set()
     models = []
-    for m in discovered_models + standard_models:
+    for m in remote_models + discovered_models + standard_models:
         if m["model"] not in seen:
             seen.add(m["model"])
             models.append(m)
