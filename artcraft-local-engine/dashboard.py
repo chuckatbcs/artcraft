@@ -188,6 +188,27 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
     .pill input { cursor: pointer; }
     
+    .tab-btn {
+      background: #1a1e27;
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      padding: 6px 14px;
+      font-size: 13px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+    .tab-btn:hover {
+      color: var(--text);
+      border-color: var(--primary);
+    }
+    .tab-btn.active {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+    
     .save-banner {
       position: sticky;
       bottom: 24px;
@@ -362,6 +383,39 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="actions">
           <button type="button" class="secondary" onclick="testConnection('omniroute')">Test OmniRoute</button>
           <div id="omniroute_test_result" class="test-result"></div>
+        </div>
+      </div>
+
+      <!-- 5. Context-Relative Active Models Filter & Catalog -->
+      <div class="card" style="grid-column: 1 / -1;">
+        <div class="card-header">
+          <div class="card-title">
+            <span>🎛️ Context-Relative Model Filter & Live Catalogs</span>
+          </div>
+          <div style="font-size: 13px; color: var(--text-muted);" id="catalog_stats">
+            Loading catalog...
+          </div>
+        </div>
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
+          ArtCraft automatically isolates models by application context: you only see image models in the <strong>Create Image</strong> app, video models in the <strong>Video</strong> app, and audio models in the <strong>Sound</strong> app. Pure text/code LLMs are excluded.
+        </p>
+
+        <!-- Filter Controls -->
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; align-items: center;">
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+            <button type="button" class="tab-btn active" id="tab_image" onclick="switchModalityTab('image')">🖼️ Image Models</button>
+            <button type="button" class="tab-btn" id="tab_video" onclick="switchModalityTab('video')">🎬 Video Models</button>
+            <button type="button" class="tab-btn" id="tab_mesh" onclick="switchModalityTab('mesh')">🧊 3D Models</button>
+            <button type="button" class="tab-btn" id="tab_splat" onclick="switchModalityTab('splat')">🌐 Splat Models</button>
+            <button type="button" class="tab-btn" id="tab_audio" onclick="switchModalityTab('audio')">🔊 Audio Models</button>
+          </div>
+          <div style="flex: 1; min-width: 220px;">
+            <input type="text" id="model_search" class="form-control" placeholder="🔍 Filter active models..." oninput="filterCatalogDisplay()">
+          </div>
+        </div>
+
+        <div id="catalog_list_container" style="max-height: 280px; overflow-y: auto; background: #161a23; padding: 12px; border-radius: 6px; border: 1px solid var(--card-border);">
+          <div style="color: var(--text-muted); font-size: 13px;">Loading catalog models...</div>
         </div>
       </div>
     </div>
@@ -546,7 +600,75 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       fetch('/v1/dev/launch_app');
     }
 
-    window.onload = loadConfig;
+    let currentModality = 'image';
+    let cachedCatalog = { image: [], video: [], mesh: [], splat: [], audio: [] };
+
+    async function loadCatalog(modality = 'image') {
+      currentModality = modality;
+      const container = document.getElementById('catalog_list_container');
+      container.innerHTML = '<div style="color: var(--text-muted); font-size: 13px;">Fetching models for ' + modality + '...</div>';
+      try {
+        const res = await fetch('/v1/ai/catalog?modality=' + modality);
+        const data = await res.json();
+        const models = data.models || [];
+        cachedCatalog[modality] = models;
+        renderCatalog(models);
+      } catch (e) {
+        container.innerHTML = '<div style="color: var(--error); font-size: 13px;">Failed to load catalog: ' + e + '</div>';
+      }
+    }
+
+    function switchModalityTab(modality) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      const activeBtn = document.getElementById('tab_' + modality);
+      if (activeBtn) activeBtn.classList.add('active');
+      loadCatalog(modality);
+    }
+
+    function renderCatalog(models) {
+      const container = document.getElementById('catalog_list_container');
+      const stats = document.getElementById('catalog_stats');
+      const q = (document.getElementById('model_search')?.value || '').toLowerCase().trim();
+      
+      const filtered = models.filter(m => {
+        if (!q) return true;
+        return (m.full_name || '').toLowerCase().includes(q) || (m.model || '').toLowerCase().includes(q) || (m.model_creator || '').toLowerCase().includes(q);
+      });
+
+      stats.textContent = `${filtered.length} of ${models.length} ${currentModality.toUpperCase()} models active in ArtCraft`;
+
+      if (filtered.length === 0) {
+        container.innerHTML = '<div style="color: var(--text-muted); font-size: 13px;">No models match your search.</div>';
+        return;
+      }
+
+      let html = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px;">';
+      for (const m of filtered) {
+        const creatorBadge = m.model_creator || 'artcraft';
+        html += `
+          <div style="background: #1e2430; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--card-border); display: flex; justify-content: space-between; align-items: center;">
+            <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px;">
+              <strong style="font-size: 13px; color: var(--text);">${m.full_name || m.model}</strong>
+              <div style="font-size: 11px; color: var(--text-muted);">${m.model}</div>
+            </div>
+            <span style="font-size: 10px; background: rgba(99,102,241,0.18); color: var(--primary); padding: 2px 8px; border-radius: 12px; text-transform: uppercase; font-weight: 600;">${creatorBadge}</span>
+          </div>
+        `;
+      }
+      html += '</div>';
+      container.innerHTML = html;
+    }
+
+    function filterCatalogDisplay() {
+      if (cachedCatalog[currentModality]) {
+        renderCatalog(cachedCatalog[currentModality]);
+      }
+    }
+
+    window.onload = () => {
+      loadConfig();
+      loadCatalog('image');
+    };
   </script>
 </body>
 </html>

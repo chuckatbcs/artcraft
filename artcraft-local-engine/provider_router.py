@@ -177,8 +177,50 @@ def test_provider_connection(provider_key: str, override_base_url: str = None, o
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def query_remote_models(provider_key: str) -> List[Dict[str, Any]]:
-    """Fetches available models from remote OpenRouter, OpenAI, OmniRoute, or custom endpoint."""
+def is_image_model(model_id: str) -> bool:
+    """Returns True if the model is an image generation model."""
+    m = model_id.lower()
+    # Reject pure text, code, audio, and video patterns
+    if any(bad in m for bad in [
+        'video', 'tts', 'audio', 'whisper', 'coder', 'coding', 'reasoning',
+        'cursor', 'embed', 'embedding', 'translate', 'instruct', 'text-only'
+    ]):
+        return False
+    # Accept explicit image indicators
+    if any(good in m for good in [
+        'image', 'flux', 'dall', 'recraft', 'diffusion', 'midjourney',
+        'sdxl', 'sd_xl', 'sd-xl', 'banana', 'seedream', 'photo', 'paint', 'draw'
+    ]):
+        return True
+    return False
+
+def is_video_model(model_id: str) -> bool:
+    """Returns True if the model is a video generation model."""
+    m = model_id.lower()
+    if 'wandb' in m:
+        return False
+    if any(bad in m for bad in [
+        'audio', 'tts', 'whisper', 'coder', 'coding', 'reasoning',
+        'cursor', 'embed', 'embedding', 'translate', 'instruct', 'text-only'
+    ]):
+        return False
+    video_keywords = [
+        'video', 'seedance', 'sora', 'runway', 'luma', 'kling',
+        'cogvideo', 'animatediff', 'motion', 'anim'
+    ]
+    if any(k in m for k in video_keywords):
+        return True
+    if any(m.startswith(w) or f'/{w}' in m or f'-{w}' in m or f'_{w}' in m for w in ['wan', 'wan2', 'wan3', 'wanx']):
+        return True
+    return False
+
+def is_audio_model(model_id: str) -> bool:
+    """Returns True if the model is an audio/TTS model."""
+    m = model_id.lower()
+    return any(good in m for good in ['audio', 'tts', 'speech', 'voice', 'whisper', 'sound'])
+
+def query_remote_models(provider_key: str, modality: str = "image") -> List[Dict[str, Any]]:
+    """Fetches available models from remote OpenRouter, OpenAI, OmniRoute, or custom endpoint filtered by modality."""
     cfg = get_providers_config()
     prov = cfg.get("providers", {}).get(provider_key)
     if not prov or not prov.get("enabled", True):
@@ -189,8 +231,8 @@ def query_remote_models(provider_key: str) -> List[Dict[str, Any]]:
     if not base_url:
         return []
 
-    # If the provider has explicitly enabled models listed, return those
-    preset_models = prov.get("enabled_models", [])
+    # If the provider has explicitly enabled models listed for this modality, return those
+    preset_models = prov.get(f"enabled_{modality}_models") or prov.get("enabled_models", [])
     
     # Try fetching remote list
     headers = {"User-Agent": "ArtCraft-Local-Engine/1.0"}
@@ -207,13 +249,23 @@ def query_remote_models(provider_key: str) -> List[Dict[str, Any]]:
             out = []
             for m in raw:
                 m_id = m.get("id") if isinstance(m, dict) else str(m)
-                # Filter for image/video relevant models if list is huge
+                
+                # Context-relative filter by modality
+                if modality == "image" and not is_image_model(m_id):
+                    continue
+                elif modality == "video" and not is_video_model(m_id):
+                    continue
+                elif modality == "audio" and not is_audio_model(m_id):
+                    continue
+
                 if preset_models and m_id not in preset_models:
                     continue
+                    
+                display_name = m_id.split("/")[-1].replace("-", " ").title()
                 out.append({
                     "model": m_id,
                     "model_creator": provider_key,
-                    "full_name": f"{m_id} ({prov.get('name', provider_key)})",
+                    "full_name": f"{display_name} ({prov.get('name', provider_key)})",
                     "text_prompt_supported": True,
                     "text_prompt_max_length": 8192,
                     "is_disabled": False,
@@ -226,10 +278,17 @@ def query_remote_models(provider_key: str) -> List[Dict[str, Any]]:
     # Fallback to configured preset list
     out = []
     for m_id in preset_models:
+        if modality == "image" and not is_image_model(m_id):
+            continue
+        elif modality == "video" and not is_video_model(m_id):
+            continue
+        elif modality == "audio" and not is_audio_model(m_id):
+            continue
+        display_name = m_id.split("/")[-1].replace("-", " ").title()
         out.append({
             "model": m_id,
             "model_creator": provider_key,
-            "full_name": f"{m_id} ({prov.get('name', provider_key)})",
+            "full_name": f"{display_name} ({prov.get('name', provider_key)})",
             "text_prompt_supported": True,
             "text_prompt_max_length": 8192,
             "is_disabled": False,

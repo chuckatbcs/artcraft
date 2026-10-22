@@ -744,10 +744,10 @@ def list_image_models():
                 "is_disabled": False,
             })
 
-    # 2b. OmniRoute Models
+    # 2b. OmniRoute Models (Context-relative: image only)
     omniroute_models = []
     if provs.get("omniroute", {}).get("enabled") or (active_key == "omniroute" and not combine_all):
-        omni_queried = query_remote_models("omniroute")
+        omni_queried = query_remote_models("omniroute", modality="image")
         for m in omni_queried:
             omniroute_models.append({
                 "model": m["model"],
@@ -1109,7 +1109,26 @@ def list_image_models():
 @app.get("/v1/omni_gen/models/video")
 def list_video_models():
     aspect_ratios = ["wide_sixteen_by_nine", "tall_nine_by_sixteen", "square"]
-    models = [
+    
+    cfg = get_providers_config()
+    provs = cfg.get("providers", {})
+    combine_all = cfg.get("combine_all_enabled", True)
+    active_key = cfg.get("active_provider", "local_comfyui")
+
+    helper_model = {
+        "model": "provider_hub_info",
+        "model_creator": "system",
+        "full_name": "! ⚙️ AI PROVIDERS SETUP (OpenAI / OpenRouter / Local)",
+        "text_prompt_supported": True,
+        "text_prompt_max_length": 2048,
+        "aspect_ratio_options": aspect_ratios,
+        "aspect_ratio_default": "wide_sixteen_by_nine",
+        "durations_seconds_supported": [5],
+        "duration_seconds_default": 5,
+        "is_disabled": False,
+    }
+
+    local_models = [
         {
             "model": "wan_3p0",
             "model_creator": "wan_ai",
@@ -1153,6 +1172,51 @@ def list_video_models():
             "is_disabled": False,
         }
     ]
+
+    remote_video_models = []
+    if provs.get("omniroute", {}).get("enabled") or (active_key == "omniroute" and not combine_all):
+        omni_vids = query_remote_models("omniroute", modality="video")
+        for m in omni_vids:
+            remote_video_models.append({
+                "model": m["model"],
+                "model_creator": "omniroute",
+                "full_name": m["full_name"],
+                "text_prompt_supported": True,
+                "text_prompt_max_length": 2048,
+                "start_frame_supported": True,
+                "start_and_end_frame_supported": True,
+                "aspect_ratio_options": aspect_ratios,
+                "aspect_ratio_default": "wide_sixteen_by_nine",
+                "durations_seconds_supported": [5],
+                "duration_seconds_default": 5,
+                "is_disabled": False,
+            })
+
+    if provs.get("openrouter", {}).get("enabled") or (active_key == "openrouter" and not combine_all):
+        or_vids = query_remote_models("openrouter", modality="video")
+        for m in or_vids:
+            remote_video_models.append({
+                "model": m["model"],
+                "model_creator": "openrouter",
+                "full_name": m["full_name"],
+                "text_prompt_supported": True,
+                "text_prompt_max_length": 2048,
+                "start_frame_supported": True,
+                "start_and_end_frame_supported": True,
+                "aspect_ratio_options": aspect_ratios,
+                "aspect_ratio_default": "wide_sixteen_by_nine",
+                "durations_seconds_supported": [5],
+                "duration_seconds_default": 5,
+                "is_disabled": False,
+            })
+
+    seen = set()
+    models = []
+    for m in [helper_model] + local_models + remote_video_models:
+        if m["model"] not in seen:
+            seen.add(m["model"])
+            models.append(m)
+
     return {
         "success": True,
         "models": models,
@@ -1199,11 +1263,49 @@ def list_splat_models():
 
 @app.get("/v1/omni_gen/models/audio")
 def list_audio_models():
+    cfg = get_providers_config()
+    provs = cfg.get("providers", {})
+    combine_all = cfg.get("combine_all_enabled", True)
+    active_key = cfg.get("active_provider", "local_comfyui")
+
+    models = [
+        {
+            "model": "chatterbox_tts",
+            "model_creator": "local",
+            "full_name": "Chatterbox TTS (Local Audio)",
+            "is_disabled": False
+        }
+    ]
+
+    if provs.get("omniroute", {}).get("enabled") or (active_key == "omniroute" and not combine_all):
+        omni_auds = query_remote_models("omniroute", modality="audio")
+        for m in omni_auds:
+            models.append({
+                "model": m["model"],
+                "model_creator": "omniroute",
+                "full_name": m["full_name"],
+                "is_disabled": False
+            })
+
     return {
         "success": True,
-        "models": [],
-        "providers": []
+        "models": models,
+        "providers": [{"provider": "artcraft", "models": [{"model": m["model"]} for m in models]}]
     }
+
+@app.get("/v1/ai/catalog")
+def get_ai_catalog(modality: str = "image"):
+    """Returns categorized and filtered model catalog for the provider dashboard."""
+    if modality == "video":
+        return list_video_models()
+    elif modality == "audio":
+        return list_audio_models()
+    elif modality == "mesh":
+        return list_mesh_models()
+    elif modality == "splat":
+        return list_splat_models()
+    else:
+        return list_image_models()
 
 # -------------------------------------------------------------
 # Generation Endpoints (Image, Video, 3D Object, Splat, BG Removal)
