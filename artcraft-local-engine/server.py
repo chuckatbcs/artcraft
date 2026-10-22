@@ -4,6 +4,8 @@ import time
 import uuid
 import shutil
 import asyncio
+import base64
+import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +52,21 @@ app.add_middleware(
 jobs_registry: Dict[str, Dict[str, Any]] = {}
 media_registry: Dict[str, Path] = {}
 media_metadata_registry: Dict[str, Dict[str, Any]] = {}
+media_b64_cache: Dict[str, str] = {}
+
+def get_media_play_url(file_path: Path, mclass: str, default_url: str) -> str:
+    if mclass == "video" and file_path.exists():
+        token = file_path.stem.split(".")[0]
+        if token in media_b64_cache:
+            return media_b64_cache[token]
+        try:
+            b64 = base64.b64encode(file_path.read_bytes()).decode("ascii")
+            data_url = f"data:video/mp4;base64,{b64}"
+            media_b64_cache[token] = data_url
+            return data_url
+        except Exception as e:
+            print(f"Failed to encode video {file_path}: {e}")
+    return default_url
 
 def get_mime_type(suffix: str) -> str:
     ext = suffix.lower()
@@ -155,7 +172,7 @@ def init_media_from_disk():
                     "public_bucket_path": f"/cdn/{f.name}",
                     "public_bucket_url": media_url,
                     "media_links": {
-                        "cdn_url": media_url,
+                        "cdn_url": get_media_play_url(f, mclass, media_url),
                         "thumbnail_template": thumbnail_url,
                         "maybe_thumbnail_template": thumbnail_url,
                         "maybe_video_previews": video_previews,
@@ -346,7 +363,7 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
                 "public_bucket_path": f"/cdn/{out_file.name}",
                 "public_bucket_url": media_url,
                 "media_links": {
-                    "cdn_url": media_url,
+                    "cdn_url": get_media_play_url(out_file, task_type, media_url),
                     "thumbnail_template": thumbnail_url,
                     "maybe_thumbnail_template": thumbnail_url,
                     "maybe_video_previews": video_previews,
@@ -371,7 +388,7 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
                 "entity_type": "media_file",
                 "entity_token": media_token,
                 "media_links": {
-                    "cdn_url": media_url,
+                    "cdn_url": get_media_play_url(out_file, task_type, media_url),
                     "thumbnail_template": thumbnail_url,
                     "maybe_thumbnail_template": thumbnail_url,
                     "maybe_video_previews": video_previews,
@@ -1531,7 +1548,7 @@ async def upload_media_file(file: UploadFile = File(...)):
         "public_bucket_path": f"/cdn/{token}{ext}",
         "public_bucket_url": media_url,
         "media_links": {
-            "cdn_url": media_url,
+            "cdn_url": get_media_play_url(dest, mclass, media_url),
             "thumbnail_template": None,
             "maybe_thumbnail_template": None,
             "maybe_video_previews": None,
@@ -1597,11 +1614,23 @@ def get_media_file_or_meta(token: str, request: Request):
     wants_json = ("application/json" in accept_header) and (not is_media_req)
 
     if not has_ext and wants_json and request.method == "GET":
+        target_meta = None
+        target_key = None
         if base_token in media_metadata_registry:
-            return {"success": True, "media_file": media_metadata_registry[base_token]}
-        for k, v in media_metadata_registry.items():
-            if k == base_token or k.startswith(base_token):
-                return {"success": True, "media_file": v}
+            target_meta = media_metadata_registry[base_token]
+            target_key = base_token
+        else:
+            for k, v in media_metadata_registry.items():
+                if k == base_token or k.startswith(base_token):
+                    target_meta = v
+                    target_key = k
+                    break
+        if target_meta:
+            meta_copy = json.loads(json.dumps(target_meta))
+            if target_key in media_registry:
+                filename = media_registry[target_key].name
+                meta_copy["media_links"]["cdn_url"] = f"{BASE_URL}/cdn/{filename}"
+            return {"success": True, "media_file": meta_copy}
 
     return serve_raw_file(token)
 
