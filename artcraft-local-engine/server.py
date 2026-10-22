@@ -1627,7 +1627,9 @@ def get_media_file_or_meta(token: str, request: Request):
                     break
         if target_meta:
             meta_copy = json.loads(json.dumps(target_meta))
-            if target_key in media_registry:
+            user_agent = request.headers.get("user-agent", "").lower()
+            is_rust_downloader = "storyteller-client" in user_agent or "reqwest" in user_agent
+            if is_rust_downloader and target_key in media_registry:
                 filename = media_registry[target_key].name
                 meta_copy["media_links"]["cdn_url"] = f"{BASE_URL}/cdn/{filename}"
             return {"success": True, "media_file": meta_copy}
@@ -1723,6 +1725,7 @@ def get_media_files_batch(tokens: Optional[str] = None):
         "media_files": files
     }
 
+@app.get("/v1/media_files/batch/{batch_token}")
 @app.get("/v1/media_files/batch_gen_redux/{batch_token}")
 def get_batch_redux(batch_token: str):
     matches = [m for m in media_metadata_registry.values() if m.get("maybe_batch_token") == batch_token]
@@ -1730,6 +1733,7 @@ def get_batch_redux(batch_token: str):
         matches = sorted(list(media_metadata_registry.values()), key=lambda x: x.get("created_at", ""), reverse=True)[:1]
     return {
         "success": True,
+        "data": matches,
         "media_files": matches
     }
 
