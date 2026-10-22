@@ -31,6 +31,7 @@ from provider_router import (
     test_provider_connection,
     query_remote_models,
     generate_remote_image,
+    normalize_base_url,
 )
 from dashboard import DASHBOARD_HTML
 
@@ -613,9 +614,12 @@ async def test_provider(request: Request):
     data = await request.json()
     prov_key = data.get("provider")
     temp_key = data.get("api_key")
+    temp_url = data.get("base_url")
+    if temp_url:
+        update_provider_details(prov_key, {"base_url": temp_url})
     if temp_key:
         update_provider_details(prov_key, {"api_key": temp_key})
-    res = test_provider_connection(prov_key)
+    res = test_provider_connection(prov_key, override_base_url=temp_url, override_api_key=temp_key)
     return res
 
 @app.post("/v1/ai/providers/full_save")
@@ -629,6 +633,8 @@ async def save_all_providers(request: Request):
             for k, v in updates.items():
                 if k == "api_key" and v == "****":
                     continue
+                if k in ("base_url", "url") and isinstance(v, str):
+                    v = normalize_base_url(v, prov_key)
                 cfg["providers"][prov_key][k] = v
     save_providers_config(cfg)
     return {"success": True, "message": "Saved! All changes active immediately."}
@@ -725,6 +731,30 @@ def list_image_models():
                 "text_prompt_max_length": 8192,
                 "image_refs_supported": True,
                 "image_refs_max": 2,
+                "aspect_ratio_options": aspect_ratios,
+                "aspect_ratio_default": "square",
+                "resolution_options": ["auto_1K", "auto_2K"],
+                "resolution_default": "auto_1K",
+                "quality_options": ["standard"],
+                "default_quality": "standard",
+                "batch_size_min": 1,
+                "batch_size_max": 4,
+                "batch_size_options": [1],
+                "batch_size_default": 1,
+                "is_disabled": False,
+            })
+
+    # 2b. OmniRoute Models
+    omniroute_models = []
+    if provs.get("omniroute", {}).get("enabled") or (active_key == "omniroute" and not combine_all):
+        omni_queried = query_remote_models("omniroute")
+        for m in omni_queried:
+            omniroute_models.append({
+                "model": m["model"],
+                "model_creator": "omniroute",
+                "full_name": m["full_name"],
+                "text_prompt_supported": True,
+                "text_prompt_max_length": 8192,
                 "aspect_ratio_options": aspect_ratios,
                 "aspect_ratio_default": "square",
                 "resolution_options": ["auto_1K", "auto_2K"],
@@ -1064,7 +1094,7 @@ def list_image_models():
     # Merge helper, enabled provider models, discovered local checkpoints, and standard presets without duplicates
     seen = set()
     models = []
-    all_candidates = [helper_model] + openai_models + openrouter_models + discovered_models + standard_models
+    all_candidates = [helper_model] + openai_models + openrouter_models + omniroute_models + discovered_models + standard_models
     for m in all_candidates:
         if m["model"] not in seen:
             seen.add(m["model"])

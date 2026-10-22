@@ -351,8 +351,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="row">
           <div class="col form-group">
-            <label>OmniRoute Base URL</label>
-            <input type="text" id="omniroute_url" class="form-control" value="http://localhost:20128/v1" onchange="markUnsaved()">
+            <label>OmniRoute Base URL <small style="color: var(--accent); font-weight: normal;">(Use http://127.0.0.1:20128/v1 — do not use https)</small></label>
+            <input type="text" id="omniroute_url" class="form-control" value="http://127.0.0.1:20128/v1" onchange="markUnsaved()">
           </div>
           <div class="col form-group">
             <label>Auth Token / API Key</label>
@@ -504,17 +504,29 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       resultEl.style.display = 'block';
       resultEl.textContent = 'Testing connection...';
 
-      // Pass currently typed key for immediate verification
+      // Pass currently typed key and URL for immediate verification
       let key = '';
-      if (provKey === 'openai') key = document.getElementById('openai_key').value.trim();
-      if (provKey === 'openrouter') key = document.getElementById('openrouter_key').value.trim();
-      if (provKey === 'omniroute') key = document.getElementById('omniroute_key').value.trim();
+      let url = '';
+      if (provKey === 'openai') {
+        key = document.getElementById('openai_key').value.trim();
+        url = document.getElementById('openai_base_url').value.trim();
+      }
+      if (provKey === 'openrouter') {
+        key = document.getElementById('openrouter_key').value.trim();
+      }
+      if (provKey === 'local_comfyui') {
+        url = document.getElementById('comfyui_url').value.trim();
+      }
+      if (provKey === 'omniroute') {
+        key = document.getElementById('omniroute_key').value.trim();
+        url = document.getElementById('omniroute_url').value.trim();
+      }
 
       try {
         const res = await fetch('/v1/ai/test', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ provider: provKey, api_key: key })
+          body: JSON.stringify({ provider: provKey, api_key: key, base_url: url })
         });
         const data = await res.json();
         if (data.success) {

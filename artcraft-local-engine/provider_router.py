@@ -104,17 +104,37 @@ def set_active_provider(provider_key: str):
         return True
     return False
 
+def normalize_base_url(url: str, provider_key: str = "") -> str:
+    """Sanitizes local URLs: converts unintended HTTPS to HTTP, fixes Windows IPv6 hostnames."""
+    if not url:
+        return url
+    url = url.strip()
+    # OmniRoute on port 20128: plain HTTP daemon bound to IPv4 (0.0.0.0)
+    if "20128" in url or provider_key == "omniroute":
+        if url.startswith("https://"):
+            url = "http://" + url[len("https://"):]
+        url = url.replace("pcgamer:20128", "127.0.0.1:20128").replace("localhost:20128", "127.0.0.1:20128")
+        if not url.endswith("/v1") and not url.endswith("/v1/"):
+            url = url.rstrip("/") + "/v1"
+    elif "20140" in url or provider_key == "local_comfyui":
+        if url.startswith("https://"):
+            url = "http://" + url[len("https://"):]
+        url = url.replace("pcgamer:20140", "127.0.0.1:20140").replace("localhost:20140", "127.0.0.1:20140")
+    return url.rstrip("/")
+
 def update_provider_details(provider_key: str, updates: Dict[str, Any]):
     cfg = get_providers_config()
     if provider_key in cfg.get("providers", {}):
         for k, v in updates.items():
             if v is not None:
+                if k in ("base_url", "url"):
+                    v = normalize_base_url(v, provider_key)
                 cfg["providers"][provider_key][k] = v
         save_providers_config(cfg)
         return True
     return False
 
-def test_provider_connection(provider_key: str) -> Dict[str, Any]:
+def test_provider_connection(provider_key: str, override_base_url: str = None, override_api_key: str = None) -> Dict[str, Any]:
     """Tests connection to a provider and returns status details."""
     cfg = get_providers_config()
     prov = cfg.get("providers", {}).get(provider_key)
@@ -122,7 +142,8 @@ def test_provider_connection(provider_key: str) -> Dict[str, Any]:
         return {"success": False, "error": f"Unknown provider: {provider_key}"}
 
     if provider_key == "local_comfyui":
-        url = prov.get("url", "http://127.0.0.1:20140").rstrip("/")
+        raw_url = override_base_url or prov.get("url", "http://127.0.0.1:20140")
+        url = normalize_base_url(raw_url, provider_key)
         try:
             req = urllib.request.Request(f"{url}/system_stats")
             with urllib.request.urlopen(req, timeout=3) as resp:
@@ -133,8 +154,9 @@ def test_provider_connection(provider_key: str) -> Dict[str, Any]:
         except Exception as e:
             return {"success": False, "error": f"Cannot reach ComfyUI on {url}: {e}"}
 
-    base_url = prov.get("base_url", "").rstrip("/")
-    api_key = prov.get("api_key", "")
+    raw_base_url = override_base_url or prov.get("base_url", "")
+    base_url = normalize_base_url(raw_base_url, provider_key)
+    api_key = override_api_key if override_api_key is not None else prov.get("api_key", "")
     if not base_url:
         return {"success": False, "error": "Base URL not configured"}
 
@@ -162,7 +184,7 @@ def query_remote_models(provider_key: str) -> List[Dict[str, Any]]:
     if not prov or not prov.get("enabled", True):
         return []
 
-    base_url = prov.get("base_url", "").rstrip("/")
+    base_url = normalize_base_url(prov.get("base_url", ""), provider_key)
     api_key = prov.get("api_key", "")
     if not base_url:
         return []
@@ -239,7 +261,7 @@ def generate_remote_image(prompt: str, model: str = None, provider_key: str = No
         prov_key = cfg.get("active_provider", "local_comfyui")
         prov = cfg.get("providers", {}).get(prov_key, {})
 
-    base_url = prov.get("base_url", "").rstrip("/")
+    base_url = normalize_base_url(prov.get("base_url", ""), prov_key)
     api_key = prov.get("api_key", "")
     chosen_model = model or prov.get("default_image_model", "dall-e-3")
 
