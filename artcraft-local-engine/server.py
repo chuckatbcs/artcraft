@@ -43,6 +43,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # In-memory registry of jobs and media files
@@ -1559,25 +1560,43 @@ def serve_raw_file(filename: str):
     if target.exists() and target.is_file():
         return FileResponse(str(target), media_type=get_mime_type(target.suffix))
     stem = filename.split(".")[0]
-    matches = list(MEDIA_DIR.glob(f"{stem}*"))
-    if matches and matches[0].is_file():
+    if stem in media_registry and media_registry[stem].exists():
+        p = media_registry[stem]
+        return FileResponse(str(p), media_type=get_mime_type(p.suffix))
+    # Look for exact primary media files matching stem (excluding helper previews)
+    matches = [
+        f for f in MEDIA_DIR.glob(f"{stem}.*")
+        if f.is_file() and not f.name.endswith(("_still.png", "_keyframe.png", "_temp.mp4", "_anim.webp", "_h264.mp4"))
+    ]
+    if matches:
         return FileResponse(str(matches[0]), media_type=get_mime_type(matches[0].suffix))
+    # Fallback to any exact stem match
+    exact_matches = [f for f in MEDIA_DIR.glob(f"{stem}.*") if f.is_file()]
+    if exact_matches:
+        return FileResponse(str(exact_matches[0]), media_type=get_mime_type(exact_matches[0].suffix))
+    # Broad fallback
+    broad_matches = list(MEDIA_DIR.glob(f"{stem}*"))
+    if broad_matches and broad_matches[0].is_file():
+        return FileResponse(str(broad_matches[0]), media_type=get_mime_type(broad_matches[0].suffix))
     return Response(status_code=404, content="Media file not found")
 
-@app.get("/cdn/{filename:path}")
+@app.api_route("/cdn/{filename:path}", methods=["GET", "HEAD"])
 def serve_cdn_file(filename: str):
     return serve_raw_file(filename)
 
-@app.get("/v1/media_files/file/{token}")
-@app.get("/v1/media_files/token/{token}")
-@app.get("/v1/media_files/by_token/{token}")
+@app.api_route("/v1/media_files/file/{token}", methods=["GET", "HEAD"])
+@app.api_route("/v1/media_files/token/{token}", methods=["GET", "HEAD"])
+@app.api_route("/v1/media_files/by_token/{token}", methods=["GET", "HEAD"])
 def get_media_file_or_meta(token: str, request: Request):
     has_ext = "." in token
-    accept_header = request.headers.get("accept", "")
+    accept_header = request.headers.get("accept", "").lower()
     base_token = token.split(".")[0]
 
-    # If asking for metadata:
-    if not has_ext and ("application/json" in accept_header or "*/*" in accept_header):
+    # Only return JSON metadata if explicitly requested via application/json without media types
+    is_media_req = any(m in accept_header for m in ["video/", "image/", "audio/"])
+    wants_json = ("application/json" in accept_header) and (not is_media_req)
+
+    if not has_ext and wants_json and request.method == "GET":
         if base_token in media_metadata_registry:
             return {"success": True, "media_file": media_metadata_registry[base_token]}
         for k, v in media_metadata_registry.items():
