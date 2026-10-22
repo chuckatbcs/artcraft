@@ -177,13 +177,19 @@ def test_provider_connection(provider_key: str, override_base_url: str = None, o
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+import time
+
+_MODELS_CACHE: Dict[str, Any] = {}
+
 def is_image_model(model_id: str) -> bool:
     """Returns True if the model is an image generation model."""
     m = model_id.lower()
     # Reject pure text, code, audio, and video patterns
     if any(bad in m for bad in [
         'video', 'tts', 'audio', 'whisper', 'coder', 'coding', 'reasoning',
-        'cursor', 'embed', 'embedding', 'translate', 'instruct', 'text-only'
+        'cursor', 'embed', 'embedding', 'translate', 'instruct', 'text-only',
+        'granite', 'llama', 'deepseek', 'mistral', 'gemma', 'qwen2', 'qwen3',
+        'glm', 'kimi', 'reflection', 'beam', 'dolphin', 'inkling'
     ]):
         return False
     # Accept explicit image indicators
@@ -201,14 +207,18 @@ def is_video_model(model_id: str) -> bool:
         return False
     if any(bad in m for bad in [
         'audio', 'tts', 'whisper', 'coder', 'coding', 'reasoning',
-        'cursor', 'embed', 'embedding', 'translate', 'instruct', 'text-only'
+        'cursor', 'embed', 'embedding', 'translate', 'instruct', 'text-only',
+        'granite', 'llama', 'deepseek', 'mistral', 'gemma', 'qwen2', 'qwen3',
+        'glm', 'kimi', 'reflection', 'beam', 'dolphin', 'inkling'
     ]):
         return False
     video_keywords = [
-        'video', 'seedance', 'sora', 'runway', 'luma', 'kling',
+        'video', 'seedance', 'sora', 'runway', 'luma',
         'cogvideo', 'animatediff', 'motion', 'anim'
     ]
     if any(k in m for k in video_keywords):
+        return True
+    if 'kling' in m and 'inkling' not in m:
         return True
     if any(m.startswith(w) or f'/{w}' in m or f'-{w}' in m or f'_{w}' in m for w in ['wan', 'wan2', 'wan3', 'wanx']):
         return True
@@ -221,6 +231,11 @@ def is_audio_model(model_id: str) -> bool:
 
 def query_remote_models(provider_key: str, modality: str = "image") -> List[Dict[str, Any]]:
     """Fetches available models from remote OpenRouter, OpenAI, OmniRoute, or custom endpoint filtered by modality."""
+    cache_key = f"{provider_key}_{modality}"
+    cached = _MODELS_CACHE.get(cache_key)
+    if cached and (time.time() - cached["timestamp"] < 300):
+        return cached["models"]
+
     cfg = get_providers_config()
     prov = cfg.get("providers", {}).get(provider_key)
     if not prov or not prov.get("enabled", True):
@@ -271,6 +286,7 @@ def query_remote_models(provider_key: str, modality: str = "image") -> List[Dict
                     "is_disabled": False,
                 })
             if out:
+                _MODELS_CACHE[cache_key] = {"timestamp": time.time(), "models": out}
                 return out
     except Exception as e:
         print(f"[ProviderRouter] Failed to query {provider_key} models: {e}")
@@ -293,6 +309,7 @@ def query_remote_models(provider_key: str, modality: str = "image") -> List[Dict
             "text_prompt_max_length": 8192,
             "is_disabled": False,
         })
+    _MODELS_CACHE[cache_key] = {"timestamp": time.time(), "models": out}
     return out
 
 def generate_remote_image(prompt: str, model: str = None, provider_key: str = None, output_path: Path = None) -> Optional[Path]:
@@ -341,19 +358,93 @@ def generate_remote_image(prompt: str, model: str = None, provider_key: str = No
 
     try:
         req = urllib.request.Request(url, data=payload, headers=headers)
-        with urllib.request.urlopen(req, timeout=75) as resp:
+        with urllib.request.urlopen(req, timeout=90) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            item = data["data"][0]
-            b64 = item.get("b64_json")
-            if b64:
-                img_data = base64.b64decode(b64)
-                with open(output_path, "wb") as f:
-                    f.write(img_data)
-                return output_path
-            img_url = item.get("url")
-            if img_url:
-                urllib.request.urlretrieve(img_url, str(output_path))
-                return output_path
+            if "data" in data and len(data["data"]) > 0:
+                item = data["data"][0]
+                b64 = item.get("b64_json")
+                if b64:
+                    img_data = base64.b64decode(b64)
+                    with open(output_path, "wb") as f:
+                        f.write(img_data)
+                    return output_path
+                img_url = item.get("url")
+                if img_url:
+                    urllib.request.urlretrieve(img_url, str(output_path))
+                    return output_path
+            print(f"[ProviderRouter] Remote image response missing data payload: {data}")
+            return None
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")[:300]
+        print(f"[ProviderRouter] Remote image generation failed on {prov.get('name', prov_key)} with model {chosen_model}: HTTP {e.code} - {err_body}")
+        return None
     except Exception as e:
         print(f"[ProviderRouter] Remote image generation failed on {prov.get('name', prov_key)} with model {chosen_model}: {e}")
+        return None
+
+def generate_remote_video(prompt: str, model: str = None, provider_key: str = None, output_path: Path = None, start_frame_path: Path = None) -> Optional[Path]:
+    """Generates a video via remote video endpoints (OmniRoute /videos/generations or custom endpoints)."""
+    if output_path is None:
+        output_path = MEDIA_DIR / f"med_{uuid.uuid4().hex[:16]}.mp4"
+        
+    cfg = get_providers_config()
+    prov_key = provider_key or cfg.get("active_provider", "omniroute")
+    prov = cfg.get("providers", {}).get(prov_key, {})
+    if not prov or not prov.get("enabled", True):
+        return None
+        
+    base_url = normalize_base_url(prov.get("base_url", ""), prov_key)
+    api_key = prov.get("api_key", "")
+    chosen_model = model or prov.get("default_video_model", "agnes/agnes-video-2.5-flash")
+    
+    url = f"{base_url}/videos/generations"
+    payload_dict: Dict[str, Any] = {
+        "prompt": prompt,
+        "model": chosen_model,
+    }
+    if start_frame_path and start_frame_path.exists():
+        with open(start_frame_path, "rb") as f:
+            b64_img = base64.b64encode(f.read()).decode("ascii")
+            payload_dict["image"] = f"data:image/png;base64,{b64_img}"
+            
+    headers = {"Content-Type": "application/json", "User-Agent": "ArtCraft-Local-Engine/1.0"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload_dict).encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            video_url = None
+            b64_data = None
+            if "data" in data and len(data["data"]) > 0:
+                item = data["data"][0]
+                video_url = item.get("url")
+                b64_data = item.get("b64_json") or item.get("b64")
+            elif "videos" in data and len(data["videos"]) > 0:
+                item = data["videos"][0]
+                video_url = item.get("url")
+                b64_data = item.get("b64")
+            elif "url" in data:
+                video_url = data["url"]
+            elif "video_url" in data:
+                video_url = data["video_url"]
+                
+            if b64_data:
+                video_bytes = base64.b64decode(b64_data)
+                with open(output_path, "wb") as f:
+                    f.write(video_bytes)
+                return output_path
+            elif video_url:
+                urllib.request.urlretrieve(video_url, str(output_path))
+                return output_path
+            else:
+                print(f"[ProviderRouter] Unexpected video response structure from {prov_key}: {list(data.keys())}")
+                return None
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")[:300]
+        print(f"[ProviderRouter] Remote video generation failed on {prov.get('name', prov_key)} with model {chosen_model}: HTTP {e.code} - {err_body}")
+        return None
+    except Exception as e:
+        print(f"[ProviderRouter] Remote video generation failed on {prov.get('name', prov_key)} with model {chosen_model}: {e}")
         return None

@@ -1,3 +1,9 @@
+> MANDATORY AGENT BOOTSTRAP PROTOCOL (v2.1.0-PRODUCTION):
+> Before creating, renaming, moving, or modifying any file in this workspace, you MUST read:
+> 1. ./SOUL.md (Brand identity, C.B. Ventures visual/audio constraints, and editorial tone)
+> 2. ./01_Docs/Production-Status.md (Confirmed, rejected, and currently approved milestones)
+> 3. C:/Users/cblac/path-map.yaml (or Drive File ID 1C-CTHLmt6J2GHFauxWh0pX5vJfn-Roau for cloud agents)
+
 # AGENTS.md
 
 This file provides guidance for coding agents when working with the Artcraft monorepo.

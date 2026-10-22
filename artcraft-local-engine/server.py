@@ -33,6 +33,7 @@ from provider_router import (
     test_provider_connection,
     query_remote_models,
     generate_remote_image,
+    generate_remote_video,
     normalize_base_url,
 )
 from dashboard import DASHBOARD_HTML
@@ -53,6 +54,50 @@ jobs_registry: Dict[str, Dict[str, Any]] = {}
 media_registry: Dict[str, Path] = {}
 media_metadata_registry: Dict[str, Dict[str, Any]] = {}
 media_b64_cache: Dict[str, str] = {}
+prompts_registry: Dict[str, Dict[str, Any]] = {}
+model_provider_registry: Dict[str, str] = {}
+
+def get_provider_for_model(model_name: str, task_type: str = "image") -> str:
+    if not model_name:
+        cfg = get_providers_config()
+        return cfg.get("active_provider", "local_comfyui")
+        
+    if model_name in model_provider_registry:
+        return model_provider_registry[model_name]
+
+    cfg = get_providers_config()
+    provs = cfg.get("providers", {})
+    
+    # Check OmniRoute if enabled
+    if provs.get("omniroute", {}).get("enabled", False):
+        omni_prefixes = [
+            "agnes/", "fastrouter/", "unorouter/", "tokenrouter/", "trk/", 
+            "aihorde/", "kc/", "kilocode/", "cl/", "cline/", "dva/", 
+            "devin-desktop/", "lmarena/", "nousapi/", "gemini/", "nvidia/",
+            "openrouter/", "pollinations/", "media/"
+        ]
+        if any(model_name.startswith(p) for p in omni_prefixes) or "omniroute" in model_name.lower():
+            return "omniroute"
+            
+    # Check OpenAI
+    if provs.get("openai", {}).get("enabled", False):
+        if "dall-e" in model_name.lower() or model_name in provs.get("openai", {}).get("enabled_models", []):
+            return "openai"
+
+    # Check OpenRouter
+    if provs.get("openrouter", {}).get("enabled", False):
+        if model_name in provs.get("openrouter", {}).get("enabled_models", []):
+            return "openrouter"
+
+    # Check Local ComfyUI
+    if any(x in model_name.lower() for x in ["sd_xl", "local", "checkpoint", ".safetensors"]):
+        return "local_comfyui"
+
+    # If OmniRoute is active provider and enabled, route to omniroute
+    if cfg.get("active_provider") == "omniroute" and provs.get("omniroute", {}).get("enabled", False):
+        return "omniroute"
+
+    return cfg.get("active_provider", "local_comfyui")
 
 def get_media_play_url(file_path: Path, mclass: str, default_url: str) -> str:
     if mclass == "video" and file_path.exists():
@@ -157,7 +202,7 @@ def init_media_from_disk():
                         "username": "local_creator",
                         "display_name": "Local Creator",
                     },
-                    "maybe_prompt_token": None,
+                    "maybe_prompt_token": f"prompt_{token}",
                     "origin": {
                         "origin_category": "generation",
                         "product_category": mclass,
@@ -233,37 +278,41 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
                 img.save(out_file)
             else:
                 cfg = get_providers_config()
-                prov_key = None
-                
-                # Infer target provider based on model name
-                if "dall-e" in model_name.lower():
-                    prov_key = "openai"
-                elif any(x in model_name.lower() for x in ["flux", "recraft", "openrouter"]):
-                    prov_key = "openrouter"
-                elif "omniroute" in model_name.lower():
-                    prov_key = "omniroute"
-                elif any(x in model_name.lower() for x in ["sd_xl", "local", "checkpoint"]):
-                    prov_key = "local_comfyui"
-                else:
-                    prov_key = cfg.get("active_provider", "local_comfyui")
-                    
+                prov_key = get_provider_for_model(model_name, task_type=task_type)
                 prov_info = cfg.get("providers", {}).get(prov_key, {})
+                
                 if prov_key != "local_comfyui" and prov_info.get("enabled", True):
                     print(f"[Engine] Routing image generation to {prov_info.get('name', prov_key)} with model {model_name}...")
                     remote_out = generate_remote_image(prompt, model=model_name, provider_key=prov_key, output_path=out_file)
                     if not remote_out or not remote_out.exists():
-                        print("[Engine] Remote provider call failed or empty; falling back to local SDXL GPU.")
+                        print(f"[Engine] Remote provider call to {prov_key} failed or returned empty; falling back to local SDXL GPU.")
                         generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
+                        prov_key = "local_comfyui"
                 else:
+                    print(f"[Engine] Routing image generation locally with model {model_name}...")
                     generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
             
         elif task_type == "video":
             prompt = params.get("prompt", "Local video generation")
             start_token = params.get("start_frame_token")
-            model_name = params.get("model")
+            model_name = params.get("model", "")
             start_path = media_registry.get(start_token) if start_token else None
             out_file = MEDIA_DIR / f"{media_token}.mp4"
-            generate_video_locally(prompt, start_frame_path=start_path, output_path=out_file)
+            
+            cfg = get_providers_config()
+            prov_key = get_provider_for_model(model_name, task_type=task_type)
+            prov_info = cfg.get("providers", {}).get(prov_key, {})
+            
+            if prov_key != "local_comfyui" and prov_info.get("enabled", True):
+                print(f"[Engine] Routing video generation to {prov_info.get('name', prov_key)} with model {model_name}...")
+                remote_out = generate_remote_video(prompt, model=model_name, provider_key=prov_key, output_path=out_file, start_frame_path=start_path)
+                if not remote_out or not remote_out.exists():
+                    print(f"[Engine] Remote video call to {prov_key} failed or returned empty; falling back to local GPU.")
+                    generate_video_locally(prompt, start_frame_path=start_path, output_path=out_file)
+                    prov_key = "local_comfyui"
+            else:
+                print(f"[Engine] Routing video generation locally with model {model_name}...")
+                generate_video_locally(prompt, start_frame_path=start_path, output_path=out_file)
             
         elif task_type == "bg_removal":
             ref_token = params.get("ref_token")
@@ -335,6 +384,9 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
                 mtype = "ply"
                 thumbnail_url = media_url
 
+            chosen_model_name = params.get("model") or ("wan_3p0" if task_type == "video" else "sd_xl_base_1.0")
+            prompt_token = f"prompt_{media_token}"
+
             media_metadata_registry[media_token] = {
                 "token": media_token,
                 "media_type": mtype,
@@ -348,15 +400,16 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
                     "username": "local_creator",
                     "display_name": "Local Creator",
                 },
-                "maybe_prompt_token": None,
+                "maybe_prompt_token": prompt_token,
+                "provider": prov_key,
                 "origin": {
                     "origin_category": "generation",
                     "product_category": task_type,
-                    "maybe_model": {"title": params.get("model", "Local Generator")},
+                    "maybe_model": {"title": chosen_model_name},
                 },
                 "origin_category": "generation",
                 "origin_product_category": task_type,
-                "maybe_origin_model_type": params.get("model", "wan_3p0" if task_type == "video" else "flux_1_dev"),
+                "maybe_origin_model_type": chosen_model_name,
                 "maybe_origin_model_token": None,
                 "maybe_duration_millis": 4000 if task_type == "video" else None,
                 "maybe_style_name": None,
@@ -380,6 +433,36 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
                 "stats": {"positive_rating_count": 0, "bookmark_count": 0},
                 "created_at": get_utc_now_iso(),
                 "updated_at": get_utc_now_iso(),
+            }
+
+            prompts_registry[prompt_token] = {
+                "token": prompt_token,
+                "created_at": get_utc_now_iso(),
+                "lcm_disabled": True,
+                "lipsync_enabled": False,
+                "maybe_aspect_ratio": params.get("aspect_ratio", "square"),
+                "maybe_batch_count": 1,
+                "maybe_context_images": None,
+                "maybe_duration_seconds": 4 if task_type == "video" else None,
+                "maybe_frame_skip": None,
+                "maybe_generate_audio": False,
+                "maybe_generation_mode": "text2image" if task_type == "image" else "text2video",
+                "maybe_generation_provider": prov_key,
+                "maybe_global_ipa_image_token": None,
+                "maybe_inference_duration_millis": None,
+                "maybe_model_class": task_type,
+                "maybe_model_type": chosen_model_name,
+                "maybe_moderator_fields": None,
+                "maybe_negative_prompt": params.get("negative_prompt"),
+                "maybe_positive_prompt": prompt,
+                "maybe_resolution": params.get("resolution", "auto_1K"),
+                "maybe_strength": None,
+                "maybe_style_name": None,
+                "maybe_travel_prompt": None,
+                "prompt_type": task_type,
+                "use_cinematic": False,
+                "used_face_detailer": False,
+                "used_upscaler": False
             }
             
             jobs_registry[job_token]["status"] = "complete_success"
@@ -1109,6 +1192,17 @@ def list_image_models():
         }
     ]
     
+    for m in openai_models:
+        model_provider_registry[m["model"]] = "openai"
+    for m in openrouter_models:
+        model_provider_registry[m["model"]] = "openrouter"
+    for m in omniroute_models:
+        model_provider_registry[m["model"]] = "omniroute"
+    for m in discovered_models:
+        model_provider_registry[m["model"]] = "local_comfyui"
+    for m in standard_models:
+        model_provider_registry[m["model"]] = "local_comfyui"
+
     # Merge helper, enabled provider models, discovered local checkpoints, and standard presets without duplicates
     seen = set()
     models = []
@@ -1227,6 +1321,11 @@ def list_video_models():
                 "duration_seconds_default": 5,
                 "is_disabled": False,
             })
+
+    for m in local_models:
+        model_provider_registry[m["model"]] = "local_comfyui"
+    for m in remote_video_models:
+        model_provider_registry[m["model"]] = m.get("model_creator", "omniroute")
 
     seen = set()
     models = []
@@ -1486,6 +1585,7 @@ def list_session_jobs(include_states: Optional[str] = None, exclude_states: Opti
     }
 
 @app.get("/v1/jobs/{job_token}")
+@app.get("/v1/jobs/job/{job_token}")
 def get_single_job(job_token: str):
     job = jobs_registry.get(job_token)
     if not job:
@@ -1497,7 +1597,14 @@ def get_single_job(job_token: str):
         "progress_percentage": job["progress_percentage"],
         "maybe_result": job.get("maybe_result"),
         "created_at": job["created_at"],
-        "updated_at": job["updated_at"]
+        "updated_at": job["updated_at"],
+        "state": {
+            "status": {
+                "status": job["status"],
+                "progress_percentage": job["progress_percentage"],
+            },
+            "maybe_result": job.get("maybe_result"),
+        }
     }
 
 # -------------------------------------------------------------
@@ -1793,6 +1900,73 @@ def delete_media(token: str):
         except Exception as e:
             print(f"[Engine] Warning: Could not unlink {p.name}: {e}")
     return {"success": True}
+
+# -------------------------------------------------------------
+# Prompts & Model Information (Lightbox & Details)
+# -------------------------------------------------------------
+@app.get("/v1/prompts/{token}")
+def get_prompt_by_token(token: str):
+    if token in prompts_registry:
+        return {"success": True, "prompt": prompts_registry[token]}
+    
+    clean_token = token.replace("prompt_", "")
+    meta = media_metadata_registry.get(clean_token)
+    if meta:
+        title = meta.get("maybe_title") or "ArtCraft Generation"
+        model_name = meta.get("origin", {}).get("maybe_model", {}).get("title") or meta.get("maybe_origin_model_type", "local_generator")
+        mclass = meta.get("media_class", "image")
+        prov = meta.get("provider", "artcraft")
+        
+        fallback_prompt = {
+            "token": token,
+            "created_at": meta.get("created_at", get_utc_now_iso()),
+            "lcm_disabled": True,
+            "lipsync_enabled": False,
+            "maybe_aspect_ratio": "square",
+            "maybe_batch_count": 1,
+            "maybe_context_images": None,
+            "maybe_duration_seconds": 4 if mclass == "video" else None,
+            "maybe_frame_skip": None,
+            "maybe_generate_audio": False,
+            "maybe_generation_mode": "text2video" if mclass == "video" else "text2image",
+            "maybe_generation_provider": prov,
+            "maybe_global_ipa_image_token": None,
+            "maybe_inference_duration_millis": None,
+            "maybe_model_class": mclass,
+            "maybe_model_type": model_name,
+            "maybe_moderator_fields": None,
+            "maybe_negative_prompt": None,
+            "maybe_positive_prompt": title,
+            "maybe_resolution": "auto_1K",
+            "maybe_strength": None,
+            "maybe_style_name": None,
+            "maybe_travel_prompt": None,
+            "prompt_type": mclass,
+            "use_cinematic": False,
+            "used_face_detailer": False,
+            "used_upscaler": False
+        }
+        return {"success": True, "prompt": fallback_prompt}
+
+    return {"success": False, "error_reason": f"Prompt {token} not found"}
+
+@app.get("/v1/prompt/batch")
+def batch_get_prompts(tokens: Optional[str] = None):
+    res = []
+    if tokens:
+        token_list = [t.strip() for t in tokens.split(",") if t.strip()]
+        for t in token_list:
+            p = prompts_registry.get(t)
+            if p:
+                res.append(p)
+            else:
+                clean = t.replace("prompt_", "")
+                if clean in media_metadata_registry:
+                    res.append(get_prompt_by_token(t).get("prompt"))
+    else:
+        res = list(prompts_registry.values())
+        
+    return {"success": True, "prompts": [r for r in res if r]}
 
 # -------------------------------------------------------------
 # Analytics & Logging (Quiet Success)
