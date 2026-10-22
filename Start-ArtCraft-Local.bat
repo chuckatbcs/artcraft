@@ -25,4 +25,8 @@ if exist "%LOCALAPPDATA%\ArtCraft\artcraft.exe" (
     echo [Warning] artcraft.exe not found at %LOCALAPPDATA%\ArtCraft\artcraft.exe. Please ensure ArtCraft is installed.
 )
 
-echo Done! ArtCraft is now running with unlimited free local models.
+:: 4. Open AI Providers Dashboard in Browser
+echo Opening AI Providers Dashboard in your browser...
+start "" "http://localhost:8000/providers"
+
+echo Done! ArtCraft is now running with unlimited free local models and custom AI providers.

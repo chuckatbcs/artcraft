@@ -192,30 +192,51 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
             ref_path = media_registry.get(ref_token) if ref_token else None
             out_file = MEDIA_DIR / f"{media_token}.png"
             
-            cfg = get_providers_config()
-            prov_key = None
-            
-            # Infer target provider based on model name
-            if "dall-e" in model_name.lower():
-                prov_key = "openai"
-            elif any(x in model_name.lower() for x in ["flux", "recraft", "openrouter"]):
-                prov_key = "openrouter"
-            elif "omniroute" in model_name.lower():
-                prov_key = "omniroute"
-            elif any(x in model_name.lower() for x in ["sd_xl", "local", "checkpoint"]):
-                prov_key = "local_comfyui"
+            if model_name == "provider_hub_info":
+                try:
+                    webbrowser.open("http://localhost:8000/providers")
+                except Exception:
+                    pass
+                from PIL import Image, ImageDraw
+                img = Image.new("RGBA", (1024, 1024), (20, 24, 35, 255))
+                draw = ImageDraw.Draw(img)
+                draw.rectangle([(40, 40), (984, 984)], fill=(30, 36, 50, 255), outline=(99, 102, 241, 255), width=4)
+                draw.text((80, 100), "ARTCRAFT AI PROVIDER SETUP", fill=(255, 255, 255, 255))
+                draw.text((80, 180), "The AI Provider Configuration Hub has opened in your browser:", fill=(200, 210, 230, 255))
+                draw.text((80, 240), "http://localhost:8000/providers", fill=(99, 102, 241, 255))
+                draw.text((80, 340), "Configurable Providers:", fill=(255, 255, 255, 255))
+                draw.text((100, 400), "1. OpenAI (Direct API Key / Subscription - DALL-E 3, DALL-E 2)", fill=(180, 190, 210, 255))
+                draw.text((100, 460), "2. OpenRouter (Flux 1.1 Pro, Recraft v3, Midjourney, etc.)", fill=(180, 190, 210, 255))
+                draw.text((100, 520), "3. Local ComfyUI / Custom Models (NVIDIA GPU)", fill=(180, 190, 210, 255))
+                draw.text((100, 580), "4. OmniRoute / LocalAI / Ollama endpoints", fill=(180, 190, 210, 255))
+                draw.text((80, 700), "Enter your keys on the web page and click 'Save & Apply'.", fill=(52, 211, 153, 255))
+                draw.text((80, 760), "All configured models will immediately activate in this dropdown menu!", fill=(200, 210, 230, 255))
+                img.save(out_file)
             else:
-                prov_key = cfg.get("active_provider", "local_comfyui")
+                cfg = get_providers_config()
+                prov_key = None
                 
-            prov_info = cfg.get("providers", {}).get(prov_key, {})
-            if prov_key != "local_comfyui" and prov_info.get("enabled", True):
-                print(f"[Engine] Routing image generation to {prov_info.get('name', prov_key)} with model {model_name}...")
-                remote_out = generate_remote_image(prompt, model=model_name, provider_key=prov_key, output_path=out_file)
-                if not remote_out or not remote_out.exists():
-                    print("[Engine] Remote provider call failed or empty; falling back to local SDXL GPU.")
+                # Infer target provider based on model name
+                if "dall-e" in model_name.lower():
+                    prov_key = "openai"
+                elif any(x in model_name.lower() for x in ["flux", "recraft", "openrouter"]):
+                    prov_key = "openrouter"
+                elif "omniroute" in model_name.lower():
+                    prov_key = "omniroute"
+                elif any(x in model_name.lower() for x in ["sd_xl", "local", "checkpoint"]):
+                    prov_key = "local_comfyui"
+                else:
+                    prov_key = cfg.get("active_provider", "local_comfyui")
+                    
+                prov_info = cfg.get("providers", {}).get(prov_key, {})
+                if prov_key != "local_comfyui" and prov_info.get("enabled", True):
+                    print(f"[Engine] Routing image generation to {prov_info.get('name', prov_key)} with model {model_name}...")
+                    remote_out = generate_remote_image(prompt, model=model_name, provider_key=prov_key, output_path=out_file)
+                    if not remote_out or not remote_out.exists():
+                        print("[Engine] Remote provider call failed or empty; falling back to local SDXL GPU.")
+                        generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
+                else:
                     generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
-            else:
-                generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
             
         elif task_type == "video":
             prompt = params.get("prompt", "Local video generation")
@@ -651,7 +672,7 @@ def list_image_models():
     helper_model = {
         "model": "provider_hub_info",
         "model_creator": "system",
-        "full_name": "⚙️ Configure AI Providers (OpenAI, OpenRouter, Local...)",
+        "full_name": "! ⚙️ AI PROVIDERS SETUP (OpenAI / OpenRouter / Local)",
         "text_prompt_supported": True,
         "text_prompt_max_length": 8192,
         "aspect_ratio_options": aspect_ratios,
@@ -1312,6 +1333,21 @@ def list_session_jobs(include_states: Optional[str] = None, exclude_states: Opti
     return {
         "success": True,
         "jobs": items
+    }
+
+@app.get("/v1/jobs/{job_token}")
+def get_single_job(job_token: str):
+    job = jobs_registry.get(job_token)
+    if not job:
+        return JSONResponse(status_code=404, content={"success": False, "error": "Job not found"})
+    return {
+        "success": True,
+        "job_token": job_token,
+        "status": job["status"],
+        "progress_percentage": job["progress_percentage"],
+        "maybe_result": job.get("maybe_result"),
+        "created_at": job["created_at"],
+        "updated_at": job["updated_at"]
     }
 
 # -------------------------------------------------------------
