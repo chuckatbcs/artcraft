@@ -8,8 +8,9 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 
+import webbrowser
 from fastapi import FastAPI, Request, Response, UploadFile, File, BackgroundTasks, Form, Body
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -27,9 +28,11 @@ from provider_router import (
     get_active_provider_info,
     set_active_provider,
     update_provider_details,
+    test_provider_connection,
     query_remote_models,
     generate_remote_image,
 )
+from dashboard import DASHBOARD_HTML
 
 app = FastAPI(title="ArtCraft Local Engine", version="1.0.0")
 
@@ -185,16 +188,31 @@ def run_job_task(job_token: str, task_type: str, params: Dict[str, Any]):
         if task_type == "image":
             prompt = params.get("prompt", "Local image generation")
             ref_token = params.get("ref_token")
-            model_name = params.get("model")
+            model_name = params.get("model", "")
             ref_path = media_registry.get(ref_token) if ref_token else None
             out_file = MEDIA_DIR / f"{media_token}.png"
             
-            active_prov = get_active_provider_info()
-            if active_prov.get("key") != "local_comfyui":
-                print(f"[Engine] Routing image generation to active provider: {active_prov.get('name')}")
-                remote_out = generate_remote_image(prompt, model=model_name, output_path=out_file)
+            cfg = get_providers_config()
+            prov_key = None
+            
+            # Infer target provider based on model name
+            if "dall-e" in model_name.lower():
+                prov_key = "openai"
+            elif any(x in model_name.lower() for x in ["flux", "recraft", "openrouter"]):
+                prov_key = "openrouter"
+            elif "omniroute" in model_name.lower():
+                prov_key = "omniroute"
+            elif any(x in model_name.lower() for x in ["sd_xl", "local", "checkpoint"]):
+                prov_key = "local_comfyui"
+            else:
+                prov_key = cfg.get("active_provider", "local_comfyui")
+                
+            prov_info = cfg.get("providers", {}).get(prov_key, {})
+            if prov_key != "local_comfyui" and prov_info.get("enabled", True):
+                print(f"[Engine] Routing image generation to {prov_info.get('name', prov_key)} with model {model_name}...")
+                remote_out = generate_remote_image(prompt, model=model_name, provider_key=prov_key, output_path=out_file)
                 if not remote_out or not remote_out.exists():
-                    print("[Engine] Remote provider call failed/empty; falling back to local SDXL GPU.")
+                    print("[Engine] Remote provider call failed or empty; falling back to local SDXL GPU.")
                     generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
             else:
                 generate_image_locally(prompt, ref_image_path=ref_path, output_path=out_file, model_name=model_name)
@@ -525,8 +543,31 @@ def cost_estimate():
     }
 
 # -------------------------------------------------------------
-# Dynamic AI Provider Management (OmniRoute / OpenRouter / Local ComfyUI)
+# Dynamic AI Provider Management & Visual Web Dashboard
 # -------------------------------------------------------------
+@app.get("/providers", response_class=HTMLResponse)
+@app.get("/settings", response_class=HTMLResponse)
+@app.get("/ui", response_class=HTMLResponse)
+def get_provider_dashboard():
+    """Serves the interactive AI Provider & Model Management UI."""
+    return HTMLResponse(content=DASHBOARD_HTML)
+
+@app.get("/v1/open_settings")
+def open_settings_browser():
+    """Opens the provider settings dashboard in the user's default browser."""
+    webbrowser.open("http://localhost:8000/providers")
+    return {"success": True, "url": "http://localhost:8000/providers"}
+
+@app.get("/v1/dev/launch_app")
+def launch_artcraft_app():
+    """Launches the ArtCraft desktop application."""
+    app_exe = Path(os.environ.get("LOCALAPPDATA", "")) / "ArtCraft" / "artcraft.exe"
+    if app_exe.exists():
+        import subprocess
+        subprocess.Popen([str(app_exe)])
+        return {"success": True, "message": "ArtCraft desktop app launched."}
+    return {"success": False, "error": f"artcraft.exe not found at {app_exe}"}
+
 @app.get("/v1/ai/providers")
 def get_ai_providers():
     cfg = get_providers_config()
@@ -541,9 +582,35 @@ def get_ai_providers():
         safe_providers[k] = v_copy
     return {
         "success": True,
+        "combine_all_enabled": cfg.get("combine_all_enabled", True),
         "active_provider": cfg.get("active_provider", "local_comfyui"),
         "providers": safe_providers
     }
+
+@app.post("/v1/ai/test")
+async def test_provider(request: Request):
+    data = await request.json()
+    prov_key = data.get("provider")
+    temp_key = data.get("api_key")
+    if temp_key:
+        update_provider_details(prov_key, {"api_key": temp_key})
+    res = test_provider_connection(prov_key)
+    return res
+
+@app.post("/v1/ai/providers/full_save")
+async def save_all_providers(request: Request):
+    data = await request.json()
+    cfg = get_providers_config()
+    if "combine_all_enabled" in data:
+        cfg["combine_all_enabled"] = data["combine_all_enabled"]
+    for prov_key, updates in data.get("providers", {}).items():
+        if prov_key in cfg.get("providers", {}):
+            for k, v in updates.items():
+                if k == "api_key" and v == "****":
+                    continue
+                cfg["providers"][prov_key][k] = v
+    save_providers_config(cfg)
+    return {"success": True, "message": "Saved! All changes active immediately."}
 
 @app.post("/v1/ai/providers")
 async def update_ai_providers(request: Request):
@@ -575,25 +642,82 @@ def list_image_models():
         "wide_sixteen_by_nine", "tall_three_by_four", "wide_four_by_three"
     ]
     
-    # 0. Check active provider from provider_router
-    active_prov = get_active_provider_info()
-    remote_models = []
-    if active_prov.get("key") != "local_comfyui":
-        remote_models = query_remote_models(active_prov.get("key"))
-        for rm in remote_models:
-            rm["aspect_ratio_options"] = aspect_ratios
-            rm["aspect_ratio_default"] = "square"
-            rm["aspect_ratio_default_when_editing"] = "square"
-            rm["resolution_options"] = ["auto_1K", "auto_2K"]
-            rm["resolution_default"] = "auto_1K"
-            rm["quality_options"] = ["standard", "high"]
-            rm["default_quality"] = "standard"
-            rm["batch_size_min"] = 1
-            rm["batch_size_max"] = 4
-            rm["batch_size_options"] = [1, 2, 4]
-            rm["batch_size_default"] = 1
+    cfg = get_providers_config()
+    provs = cfg.get("providers", {})
+    combine_all = cfg.get("combine_all_enabled", True)
+    active_key = cfg.get("active_provider", "local_comfyui")
 
-    # 1. Dynamically scan checkpoints folder for any local safetensors
+    # 0. Helper entry at the very top pointing to Provider Hub
+    helper_model = {
+        "model": "provider_hub_info",
+        "model_creator": "system",
+        "full_name": "⚙️ Configure AI Providers (OpenAI, OpenRouter, Local...)",
+        "text_prompt_supported": True,
+        "text_prompt_max_length": 8192,
+        "aspect_ratio_options": aspect_ratios,
+        "aspect_ratio_default": "square",
+        "resolution_options": ["auto_1K"],
+        "resolution_default": "auto_1K",
+        "quality_options": ["standard"],
+        "default_quality": "standard",
+        "batch_size_min": 1,
+        "batch_size_max": 1,
+        "batch_size_options": [1],
+        "batch_size_default": 1,
+        "is_disabled": False,
+    }
+
+    # 1. OpenAI Models (DALL-E 3, DALL-E 2)
+    openai_models = []
+    if provs.get("openai", {}).get("enabled") or (active_key == "openai" and not combine_all):
+        for m_id in provs.get("openai", {}).get("enabled_models", ["dall-e-3", "dall-e-2"]):
+            openai_models.append({
+                "model": m_id,
+                "model_creator": "open_ai",
+                "full_name": f"{m_id.upper()} (OpenAI API / Subscription)",
+                "text_prompt_supported": True,
+                "text_prompt_max_length": 4096,
+                "image_refs_supported": False,
+                "aspect_ratio_options": aspect_ratios,
+                "aspect_ratio_default": "square",
+                "resolution_options": ["auto_1K"],
+                "resolution_default": "auto_1K",
+                "quality_options": ["standard", "hd"],
+                "default_quality": "standard",
+                "batch_size_min": 1,
+                "batch_size_max": 4,
+                "batch_size_options": [1],
+                "batch_size_default": 1,
+                "is_disabled": False,
+            })
+
+    # 2. OpenRouter Models
+    openrouter_models = []
+    if provs.get("openrouter", {}).get("enabled") or (active_key == "openrouter" and not combine_all):
+        for m_id in provs.get("openrouter", {}).get("enabled_models", []):
+            clean_name = m_id.split("/")[-1].replace("-", " ").title()
+            openrouter_models.append({
+                "model": m_id,
+                "model_creator": "openrouter",
+                "full_name": f"{clean_name} (OpenRouter: {m_id})",
+                "text_prompt_supported": True,
+                "text_prompt_max_length": 8192,
+                "image_refs_supported": True,
+                "image_refs_max": 2,
+                "aspect_ratio_options": aspect_ratios,
+                "aspect_ratio_default": "square",
+                "resolution_options": ["auto_1K", "auto_2K"],
+                "resolution_default": "auto_1K",
+                "quality_options": ["standard"],
+                "default_quality": "standard",
+                "batch_size_min": 1,
+                "batch_size_max": 4,
+                "batch_size_options": [1],
+                "batch_size_default": 1,
+                "is_disabled": False,
+            })
+
+    # 3. Dynamically scan checkpoints folder for any local safetensors
     discovered_models = []
     ckpt_dir = CHECKPOINTS_DIR
     if ckpt_dir.exists():
@@ -602,7 +726,7 @@ def list_image_models():
             discovered_models.append({
                 "model": model_key,
                 "model_creator": "local",
-                "full_name": f"{ckpt.stem} (Local Checkpoint)",
+                "full_name": f"{ckpt.stem} (Local GPU Checkpoint)",
                 "text_prompt_supported": True,
                 "text_prompt_max_length": 4096,
                 "negative_text_prompt_supported": True,
@@ -916,10 +1040,11 @@ def list_image_models():
         }
     ]
     
-    # Merge remote, discovered, and standard models without duplicates
+    # Merge helper, enabled provider models, discovered local checkpoints, and standard presets without duplicates
     seen = set()
     models = []
-    for m in remote_models + discovered_models + standard_models:
+    all_candidates = [helper_model] + openai_models + openrouter_models + discovered_models + standard_models
+    for m in all_candidates:
         if m["model"] not in seen:
             seen.add(m["model"])
             models.append(m)
